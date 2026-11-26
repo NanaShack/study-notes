@@ -72,6 +72,7 @@ const NOTE_TYPES = {
   bullet: { name: '箇条書き', icon: '📝', desc: 'インデント・チェック付き' },
   cornell: { name: 'コーネル式', icon: '🗂️', desc: 'キーワード／ノート／まとめ' },
   cards: { name: '暗記カード', icon: '🃏', desc: '表と裏・赤シート・カード' },
+  dict: { name: '用語辞典', icon: '📖', desc: '用語と説明を辞書のように' },
 };
 const TEXT_TYPES = ['lined', 'grid', 'blank'];
 const Q_TYPES = {
@@ -274,6 +275,7 @@ function normalizeNote(n) {
   if (n.type === 'bullet') c.items = Array.isArray(c.items) ? c.items : [];
   if (n.type === 'cornell') { c.cues ??= ''; c.notes ??= ''; c.summary ??= ''; }
   if (n.type === 'cards') c.cards = Array.isArray(c.cards) ? c.cards : [];
+  if (n.type === 'dict') { c.entries = Array.isArray(c.entries) ? c.entries : []; c.entries.forEach((e) => { e.id ??= uid('e'); e.term ??= ''; e.desc ??= ''; }); }
   return n;
 }
 function noteText(n) {
@@ -282,10 +284,24 @@ function noteText(n) {
     case 'bullet': return (c.items || []).map((i) => '  '.repeat(i.level || 0) + (i.text || '')).join('\n');
     case 'cornell': return [c.cues, c.notes, c.summary].filter(Boolean).join('\n\n');
     case 'cards': return (c.cards || []).map((k) => `${k.front || ''} | ${k.back || ''}`).join('\n');
+    case 'dict': return (c.entries || []).map((e) => `${e.term || ''} | ${String(e.desc || '').replace(/\n/g, ' / ')}`).join('\n');
     default: return c.text || '';
   }
 }
 function convertNote(n, type) {
+  // 暗記カード ⇔ 用語辞典 はそのまま対応づける
+  if (n.type === 'dict' && type === 'cards') return { ...n, type, content: { cards: (n.content.entries || []).map((e) => ({ id: uid('k'), front: e.term, back: e.desc, ok: false })) } };
+  if (n.type === 'cards' && type === 'dict') return { ...n, type, content: { entries: (n.content.cards || []).map((k) => ({ id: uid('e'), term: k.front, desc: k.back })) } };
+  if (n.type === 'cornell' && type === 'dict') {
+    const cues = (n.content.cues || '').split('\n'), notes = (n.content.notes || '').split('\n');
+    const entries = []; let cur = null;
+    for (let i = 0; i < Math.max(cues.length, notes.length); i++) {
+      const t = (cues[i] || '').trim(), d = notes[i] || '';
+      if (t || !cur) { cur = { id: uid('e'), term: t, desc: d }; entries.push(cur); } else cur.desc += (cur.desc ? '\n' : '') + d;
+    }
+    entries.forEach((e) => (e.desc = e.desc.replace(/\n+$/, '')));
+    return { ...n, type, content: { entries: entries.filter((e) => e.term || e.desc) } };
+  }
   const text = noteText(n);
   const lines = text.split('\n');
   let content;
@@ -293,6 +309,7 @@ function convertNote(n, type) {
   else if (type === 'bullet') content = { items: lines.filter((l) => l.trim()).map((l) => ({ text: l.trim(), level: Math.min(5, Math.floor((l.match(/^ */)[0].length) / 2)) })) };
   else if (type === 'cornell') content = { cues: '', notes: text, summary: '' };
   else if (type === 'cards') content = { cards: parseCardLines(text) };
+  else if (type === 'dict') content = { entries: parseCardLines(text).map((k) => ({ id: uid('e'), term: k.front, desc: k.back.replace(/ \/ /g, '\n') })) };
   return { ...n, type, content };
 }
 function parseCardLines(text) {
@@ -356,6 +373,7 @@ function newNote(type, folder = '') {
   const n = normalizeNote({ title: '', type, folder, order: nextOrder('notes', folder), createdAt: Date.now(), updatedAt: Date.now(), content: {} });
   if (type === 'bullet') n.content.items = [{ text: '', level: 0 }];
   if (type === 'cards') n.content.cards = [{ id: uid('k'), front: '', back: '', ok: false }];
+  if (type === 'dict') n.content.entries = [{ id: uid('e'), term: '', desc: '' }];
   Store.put(P.note(id), n);
   return id;
 }
@@ -741,6 +759,7 @@ function renderNote(main, id) {
   else if (n.type === 'bullet') bulletEditor(content, n, mode, saveSoon, save);
   else if (n.type === 'cornell') cornellEditor(content, n, mode, saveSoon);
   else if (n.type === 'cards') cardsEditor(content, n, id, mode, saveSoon, save);
+  else if (n.type === 'dict') dictEditor(content, n, id, mode, saveSoon, save);
 }
 
 function wrapSelection(ta, before, after, onChange) {
@@ -895,11 +914,83 @@ function cardsEditor(root, n, id, mode, saveSoon, save) {
     h('button', { class: 'btn', style: { marginTop: '10px', width: '100%' }, onclick: () => { cards.push({ id: uid('k'), front: '', back: '', ok: false }); save(); draw(true); } }, '＋ カード追加'));
   draw();
 }
-function bulkCards(cards, done) {
+const dictUI = {};
+function dictEditor(root, n, id, mode, saveSoon, save) {
+  const c = n.content, E = c.entries;
+  const st = (dictUI[id] ||= { q: '', hide: 'desc' });
+  const LH = 32;
+  const fit = (ta) => { ta.style.height = 'auto'; ta.style.height = Math.max(LH, Math.ceil((ta.scrollHeight - 1) / LH) * LH) + 'px'; };
+  const view = () => {
+    let list = E.slice();
+    if (c.sort === 'abc') list.sort((a, b) => (!a.term) - (!b.term) || a.term.localeCompare(b.term, 'ja', { numeric: true, sensitivity: 'base' }));
+    const q = norm(st.q);
+    if (q) list = list.filter((e) => norm(e.term + ' ' + e.desc).includes(q));
+    return list;
+  };
+  const box = h('div', { class: 'paper dict' });
+  const count = h('span', { class: 'hint', style: { alignSelf: 'center' } });
+  let lastTa = null;
+
+  const addEntry = (after) => {
+    const e = { id: uid('e'), term: '', desc: '' };
+    const i = after ? E.indexOf(after) : -1;
+    if (i >= 0 && c.sort !== 'abc') E.splice(i + 1, 0, e); else E.push(e);
+    if (st.q) st.q = '', search.value = '';
+    save(); draw(e.id);
+  };
+  function draw(focusId) {
+    const list = view();
+    count.textContent = st.q ? `${list.length} / ${E.length}件` : `${E.length}件`;
+    if (mode === 'hide') {
+      box.replaceChildren(...list.map((e) => h('div', { class: 'dict-row view' },
+        h('div', { class: 'dict-term' }, h('div', { class: st.hide === 'term' ? 'mask-block' : '', html: renderMarked(e.term, true) || '&nbsp;' })),
+        h('div', { class: 'dict-desc' }, h('div', { class: st.hide === 'desc' ? 'mask-block' : '', html: renderMarked(e.desc, true) || '&nbsp;' })))));
+      if (!list.length) box.append(h('div', { class: 'empty' }, st.q ? '見つかりませんでした' : '項目がありません'));
+      return;
+    }
+    box.replaceChildren(...list.map((e) => {
+      const t = h('textarea', { class: 'dict-term', rows: 1, value: e.term, placeholder: '用語', spellcheck: false });
+      const d = h('textarea', { class: 'dict-desc', rows: 1, value: e.desc, placeholder: '説明（Enterで改行）', spellcheck: false });
+      t.addEventListener('input', () => { e.term = t.value.replace(/\n/g, ' '); if (t.value.includes('\n')) t.value = e.term; fit(t); saveSoon(); });
+      d.addEventListener('input', () => { e.desc = d.value; fit(d); saveSoon(); });
+      t.addEventListener('focus', () => (lastTa = t)); d.addEventListener('focus', () => (lastTa = d));
+      t.addEventListener('keydown', (ev) => { if (ev.isComposing || ev.keyCode === 229) return; if (ev.key === 'Enter') { ev.preventDefault(); d.focus(); d.setSelectionRange(d.value.length, d.value.length); } });
+      d.addEventListener('keydown', (ev) => {
+        if (ev.isComposing || ev.keyCode === 229) return;
+        if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); addEntry(e); }
+        else if (ev.key === 'Tab' && !ev.shiftKey && e === list[list.length - 1] && (e.term || e.desc)) { ev.preventDefault(); addEntry(e); }
+      });
+      const row = h('div', { class: 'dict-row', 'data-id': e.id }, t, d,
+        h('button', { class: 'dict-del', 'aria-label': '削除', title: 'この項目を削除', onclick: () => {
+          E.splice(E.indexOf(e), 1); save(); draw();
+        } }, '✕'));
+      return row;
+    }));
+    if (!list.length) box.append(h('div', { class: 'empty' }, st.q ? '見つかりませんでした' : '「＋ 項目を追加」から書き始めます'));
+    box.querySelectorAll('textarea').forEach(fit);
+    if (focusId) box.querySelector(`[data-id="${focusId}"] .dict-term`)?.focus();
+  }
+  const search = h('input', { type: 'search', class: 'dict-search', placeholder: '🔍 用語・説明を検索', value: st.q, oninput: (e) => { st.q = e.target.value; draw(); } });
+  const sortSel = h('select', { class: 'dict-sort', 'aria-label': '並び順', onchange: (e) => { c.sort = e.target.value; save(); draw(); } },
+    h('option', { value: 'added', selected: c.sort !== 'abc' }, '追加順'), h('option', { value: 'abc', selected: c.sort === 'abc' }, 'あいうえお・ABC順'));
+  const tools = mode === 'hide'
+    ? [h('div', { class: 'seg' }, [['desc', '説明を隠す'], ['term', '用語を隠す']].map(([k, l]) => h('button', { class: st.hide === k ? 'on' : '', onclick: () => { st.hide = k; renderMain(); } }, l))),
+       h('button', { onclick: () => box.querySelectorAll('.mask-block, .mask').forEach((m) => m.classList.add('shown')) }, '👀 すべて表示'),
+       h('button', { onclick: () => box.querySelectorAll('.mask-block, .mask').forEach((m) => m.classList.remove('shown')) }, '🟥 すべて隠す')]
+    : [h('button', { onclick: () => addEntry() }, '＋ 項目を追加'),
+       h('button', { onclick: () => bulkCards([], () => {}, (add) => { E.push(...add.map((k) => ({ id: uid('e'), term: k.front, desc: k.back.replace(/ \/ /g, '\n') }))); for (let i = E.length - 1; i >= 0; i--) if (!E[i].term && !E[i].desc && E.length > 1) E.splice(i, 1); save(); draw(); }) }, '📥 まとめて入力'),
+       h('button', { onmousedown: (e) => e.preventDefault(), onclick: () => lastTa ? wrapSelection(lastTa, '[[', ']]') : toast('先に文字を選択してください') }, '🟥 隠す語')];
+  root.append(h('div', { class: 'toolbar dict-tools' }, search, sortSel, ...tools, count), box);
+  if (mode === 'hide') bindMasks(box);
+  else root.append(h('button', { class: 'btn', style: { marginTop: '10px', width: '100%' }, onclick: () => addEntry() }, '＋ 項目を追加'),
+    h('p', { class: 'hint' }, '用語でEnter → 説明へ移動 ／ 説明の中のEnterは改行 ／ 最後の項目でTab または Ctrl+Enter で次の項目'));
+  draw();
+}
+function bulkCards(cards, done, custom) {
   const ta = h('textarea', { class: 'plain', rows: 10, placeholder: '1行に1枚。表と裏は「 | 」かタブで区切る\n例:\n資産 | 現金・預金・売掛金など\n負債 | 買掛金・借入金など' });
   modal('まとめて入力', h('div', {}, ta, h('p', { class: 'hint' }, 'Excel やスプレッドシートの2列をそのまま貼り付けてもOK。AIに「暗記カード用に『用語 | 意味』の形式で」と頼むのも便利です。')), [
     { label: 'キャンセル' },
-    { label: '追加', cls: 'primary', run: () => { const add = parseCardLines(ta.value); for (let i = cards.length - 1; i >= 0; i--) if (!cards[i].front && !cards[i].back) cards.splice(i, 1); cards.push(...add); done(); toast(`${add.length}枚追加しました`); } },
+    { label: '追加', cls: 'primary', run: () => { const add = parseCardLines(ta.value); if (custom) { custom(add); toast(`${add.length}件追加しました`); return; } for (let i = cards.length - 1; i >= 0; i--) if (!cards[i].front && !cards[i].back) cards.splice(i, 1); cards.push(...add); done(); toast(`${add.length}枚追加しました`); } },
   ]);
 }
 function flashCards(root, n, id, save) {
@@ -1327,6 +1418,7 @@ type ごとの content:
 - "bullet"（箇条書き）: {"items": [{"text": "項目", "level": 0}, {"text": "子項目", "level": 1, "check": false}]}
 - "cornell"（コーネル式）: {"cues": "キーワード", "notes": "ノート本文", "summary": "まとめ"}
 - "cards"（暗記カード）: {"cards": [{"id": "k1", "front": "表", "back": "裏", "ok": false}]}
+- "dict"（用語辞典）: {"entries": [{"id": "e1", "term": "ROUND", "desc": "ROUND(数値, 桁数)\\n四捨五入\\n桁数0で整数"}], "sort": "added"}   ※ desc は改行(\\n)で複数行。sort は "added"（追加順）か "abc"（あいうえお順）
 `;
 
 /* ================= samples ================= */

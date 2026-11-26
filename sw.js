@@ -1,7 +1,7 @@
 // まなびノート service worker
 // アプリ本体はネット優先（更新がすぐ反映される）・オフライン時はキャッシュを使う。
 // GitHub API など外部への通信はキャッシュしない。
-const CACHE = 'manabi-v2';
+const CACHE = 'manabi-v3';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'

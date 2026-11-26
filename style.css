@@ -401,3 +401,47 @@ textarea.dict-term:focus, textarea.dict-desc:focus { background: color-mix(in sr
 
 .dict-row.view .mask-block { border-radius: 6px; box-shadow: inset 0 0 0 3px var(--paper); }
 .dict-row.view .mask-block.shown { box-shadow: none; }
+
+/* ---------- compare (対比ノート) ---------- */
+:root { --cmp-a: #2f6fde; --cmp-a-bg: #eaf1fd; --cmp-b: #d9622b; --cmp-b-bg: #fdf0e8; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --cmp-a: #7aa7ff; --cmp-a-bg: #1d2a42; --cmp-b: #ff9a66; --cmp-b-bg: #3a2519; } }
+:root[data-theme="dark"] { --cmp-a: #7aa7ff; --cmp-a-bg: #1d2a42; --cmp-b: #ff9a66; --cmp-b-bg: #3a2519; }
+.compare { padding: 0 0 4px; overflow: hidden; }
+.cmp-row:not(.cmp-head), .cmp-sum-v { background-image: linear-gradient(transparent 31px, var(--rule) 31px); background-size: 100% 32px; background-attachment: local; }
+.compare input.cmp-title { border-radius: 0; border-top: 0; border-left: 0; padding: 0 12px; outline: none; }
+.compare input.cmp-title.cmp-left { border-right: 2px solid var(--margin); }
+.compare input.cmp-title.cmp-right { border-right: 0; }
+.cmp-row { display: grid; grid-template-columns: 1fr 1fr 32px; position: relative; }
+.compare.view .cmp-row { grid-template-columns: 1fr 1fr; }
+.compare.with-point .cmp-row { grid-template-columns: minmax(70px, 18%) 1fr 1fr 32px; }
+.compare.with-point.view .cmp-row { grid-template-columns: minmax(70px, 18%) 1fr 1fr; }
+.cmp-row:not(.cmp-head)::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--muted); opacity: .22; }
+.cmp-cell {
+  border: 0; background: transparent; resize: none; outline: none; overflow: hidden; width: 100%; min-width: 0; margin: 0; display: block;
+  font-size: var(--note-font); line-height: 32px; padding: 0 12px; white-space: pre-wrap; word-break: break-word;
+}
+.cmp-left { border-right: 2px solid var(--margin); }
+.cmp-point { border-right: 1px solid var(--rule); font-size: 13px; font-weight: 700; color: var(--muted); }
+textarea.cmp-cell:focus, input.cmp-title:focus { background: color-mix(in srgb, var(--accent-weak) 55%, transparent); }
+.cmp-head { position: sticky; top: 0; z-index: 1; }
+.cmp-head .cmp-title { font-weight: 800; font-size: calc(var(--note-font) + 1px); height: 44px; line-height: 44px; text-align: center; }
+.cmp-head .cmp-left { background: var(--cmp-a-bg); color: var(--cmp-a); border-bottom: 3px solid var(--cmp-a); }
+.cmp-head .cmp-right { background: var(--cmp-b-bg); color: var(--cmp-b); border-bottom: 3px solid var(--cmp-b); }
+.cmp-head .cmp-ph { height: 44px; line-height: 44px; background: var(--bg); border-bottom: 3px solid var(--line); }
+.cmp-head > div:last-child:empty { background: var(--bg); border-bottom: 3px solid var(--line); }
+.cmp-head input::placeholder { color: inherit; opacity: .55; font-weight: 600; font-size: 13px; }
+.cmp-head + .cmp-row, .cmp-head ~ .cmp-row { }
+.compare .cmp-row:nth-child(2) { margin-top: 0; }
+.compare.view .mask-block { border-radius: 6px; box-shadow: inset 0 0 0 3px var(--paper); }
+.compare.view .mask-block.shown { box-shadow: none; }
+.cmp-sum { border-top: 2px solid var(--margin); margin-top: 16px; }
+.cmp-sum-l { font-size: 12px; font-weight: 700; color: var(--muted); padding: 6px 12px 0; letter-spacing: .05em; }
+.cmp-sum-v { border: 0; background: transparent; resize: none; outline: none; overflow: hidden; width: 100%; display: block; font-size: var(--note-font); line-height: 32px; padding: 0 12px 4px; white-space: pre-wrap; word-break: break-word; }
+@media (max-width: 480px) {
+  .cmp-cell, .cmp-sum-v { padding: 0 7px; }
+  .cmp-row { grid-template-columns: 1fr 1fr 26px; }
+  .compare.with-point .cmp-row { grid-template-columns: 56px 1fr 1fr 26px; }
+  .compare.with-point.view .cmp-row { grid-template-columns: 56px 1fr 1fr; }
+  .cmp-point { font-size: 11.5px; line-height: 1.5; padding-top: 6px; }
+}
+.pv.compare { background-image: linear-gradient(90deg, var(--cmp-a-bg) 0 50%, var(--cmp-b-bg) 50% 100%), linear-gradient(90deg, transparent calc(50% - 1px), var(--margin) calc(50% - 1px), var(--margin) calc(50% + 1px), transparent calc(50% + 1px)), linear-gradient(transparent 11px, var(--rule) 11px); background-size: 100% 16px, 100% 100%, 100% 12px; background-repeat: no-repeat, no-repeat, repeat; background-position: 0 0, 0 0, 0 4px; }

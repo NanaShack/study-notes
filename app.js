@@ -73,6 +73,7 @@ const NOTE_TYPES = {
   cornell: { name: 'コーネル式', icon: '🗂️', desc: 'キーワード／ノート／まとめ' },
   cards: { name: '暗記カード', icon: '🃏', desc: '表と裏・赤シート・カード' },
   dict: { name: '用語辞典', icon: '📖', desc: '用語と説明を辞書のように' },
+  compare: { name: '対比ノート', icon: '⚖️', desc: '左右に分けて違いを比べる' },
 };
 const TEXT_TYPES = ['lined', 'grid', 'blank'];
 const Q_TYPES = {
@@ -275,6 +276,11 @@ function normalizeNote(n) {
   if (n.type === 'bullet') c.items = Array.isArray(c.items) ? c.items : [];
   if (n.type === 'cornell') { c.cues ??= ''; c.notes ??= ''; c.summary ??= ''; }
   if (n.type === 'cards') c.cards = Array.isArray(c.cards) ? c.cards : [];
+  if (n.type === 'compare') {
+    c.leftTitle ??= ''; c.rightTitle ??= ''; c.summary ??= ''; c.showPoint ??= false;
+    c.rows = Array.isArray(c.rows) ? c.rows : [];
+    c.rows.forEach((r) => { r.id ??= uid('r'); r.point ??= ''; r.left ??= ''; r.right ??= ''; });
+  }
   if (n.type === 'dict') { c.entries = Array.isArray(c.entries) ? c.entries : []; c.entries.forEach((e) => { e.id ??= uid('e'); e.term ??= ''; e.desc ??= ''; }); }
   return n;
 }
@@ -284,6 +290,7 @@ function noteText(n) {
     case 'bullet': return (c.items || []).map((i) => '  '.repeat(i.level || 0) + (i.text || '')).join('\n');
     case 'cornell': return [c.cues, c.notes, c.summary].filter(Boolean).join('\n\n');
     case 'cards': return (c.cards || []).map((k) => `${k.front || ''} | ${k.back || ''}`).join('\n');
+    case 'compare': return [`${c.leftTitle || '左'} | ${c.rightTitle || '右'}`, ...(c.rows || []).map((r) => `${r.point ? r.point + '：' : ''}${String(r.left || '').replace(/\n/g, ' / ')} | ${String(r.right || '').replace(/\n/g, ' / ')}`), c.summary || ''].filter(Boolean).join('\n');
     case 'dict': return (c.entries || []).map((e) => `${e.term || ''} | ${String(e.desc || '').replace(/\n/g, ' / ')}`).join('\n');
     default: return c.text || '';
   }
@@ -292,6 +299,15 @@ function convertNote(n, type) {
   // 暗記カード ⇔ 用語辞典 はそのまま対応づける
   if (n.type === 'dict' && type === 'cards') return { ...n, type, content: { cards: (n.content.entries || []).map((e) => ({ id: uid('k'), front: e.term, back: e.desc, ok: false })) } };
   if (n.type === 'cards' && type === 'dict') return { ...n, type, content: { entries: (n.content.cards || []).map((k) => ({ id: uid('e'), term: k.front, desc: k.back })) } };
+  if (type === 'compare' && (n.type === 'cards' || n.type === 'dict')) {
+    const src = n.type === 'cards' ? (n.content.cards || []).map((k) => [k.front, k.back]) : (n.content.entries || []).map((e) => [e.term, e.desc]);
+    return { ...n, type, content: { leftTitle: '', rightTitle: '', summary: '', showPoint: false, rows: src.map(([l, r]) => ({ id: uid('r'), point: '', left: l || '', right: r || '' })) } };
+  }
+  if (n.type === 'compare' && (type === 'cards' || type === 'dict')) {
+    const rows = n.content.rows || [];
+    if (type === 'cards') return { ...n, type, content: { cards: rows.map((r) => ({ id: uid('k'), front: r.left, back: r.right, ok: false })) } };
+    return { ...n, type, content: { entries: rows.map((r) => ({ id: uid('e'), term: r.left, desc: r.right })) } };
+  }
   if (n.type === 'cornell' && type === 'dict') {
     const cues = (n.content.cues || '').split('\n'), notes = (n.content.notes || '').split('\n');
     const entries = []; let cur = null;
@@ -309,6 +325,7 @@ function convertNote(n, type) {
   else if (type === 'bullet') content = { items: lines.filter((l) => l.trim()).map((l) => ({ text: l.trim(), level: Math.min(5, Math.floor((l.match(/^ */)[0].length) / 2)) })) };
   else if (type === 'cornell') content = { cues: '', notes: text, summary: '' };
   else if (type === 'cards') content = { cards: parseCardLines(text) };
+  else if (type === 'compare') content = { leftTitle: '', rightTitle: '', summary: '', showPoint: false, rows: parseCardLines(text).map((k) => ({ id: uid('r'), point: '', left: k.front, right: k.back.replace(/ \/ /g, '\n') })) };
   else if (type === 'dict') content = { entries: parseCardLines(text).map((k) => ({ id: uid('e'), term: k.front, desc: k.back.replace(/ \/ /g, '\n') })) };
   return { ...n, type, content };
 }
@@ -374,6 +391,7 @@ function newNote(type, folder = '') {
   if (type === 'bullet') n.content.items = [{ text: '', level: 0 }];
   if (type === 'cards') n.content.cards = [{ id: uid('k'), front: '', back: '', ok: false }];
   if (type === 'dict') n.content.entries = [{ id: uid('e'), term: '', desc: '' }];
+  if (type === 'compare') n.content.rows = [0, 1, 2].map(() => ({ id: uid('r'), point: '', left: '', right: '' }));
   Store.put(P.note(id), n);
   return id;
 }
@@ -760,6 +778,7 @@ function renderNote(main, id) {
   else if (n.type === 'cornell') cornellEditor(content, n, mode, saveSoon);
   else if (n.type === 'cards') cardsEditor(content, n, id, mode, saveSoon, save);
   else if (n.type === 'dict') dictEditor(content, n, id, mode, saveSoon, save);
+  else if (n.type === 'compare') compareEditor(content, n, id, mode, saveSoon, save);
 }
 
 function wrapSelection(ta, before, after, onChange) {
@@ -912,6 +931,82 @@ function cardsEditor(root, n, id, mode, saveSoon, save) {
     h('button', { onclick: () => { cards.forEach((k) => (k.ok = false)); save(); draw(); toast('習得状況をリセットしました'); } }, '↺ 習得リセット'),
     h('span', { class: 'hint', style: { alignSelf: 'center' } }, `${cards.length}枚 ・ 覚えた ${cards.filter((k) => k.ok).length}`)), list,
     h('button', { class: 'btn', style: { marginTop: '10px', width: '100%' }, onclick: () => { cards.push({ id: uid('k'), front: '', back: '', ok: false }); save(); draw(true); } }, '＋ カード追加'));
+  draw();
+}
+const cmpUI = {};
+function compareEditor(root, n, id, mode, saveSoon, save) {
+  const c = n.content, R = c.rows;
+  const st = (cmpUI[id] ||= { hide: 'right' });
+  const LH = 32;
+  const fit = (ta) => { ta.style.height = 'auto'; ta.style.height = Math.max(LH, Math.ceil((ta.scrollHeight - 1) / LH) * LH) + 'px'; };
+  const hide = mode === 'hide';
+  const box = h('div', { class: 'paper compare' + (c.showPoint ? ' with-point' : '') + (hide ? ' view' : '') });
+  let lastTa = null;
+  const addRow = (after) => {
+    const r = { id: uid('r'), point: '', left: '', right: '' };
+    const i = after ? R.indexOf(after) : -1;
+    if (i >= 0) R.splice(i + 1, 0, r); else R.push(r);
+    save(); draw(r.id);
+  };
+  const cellTa = (r, key, ph, last) => {
+    const ta = h('textarea', { class: 'cmp-cell cmp-' + key, rows: 1, value: r[key], placeholder: ph, spellcheck: false });
+    ta.addEventListener('input', () => { r[key] = ta.value; eqRow(ta.parentElement); saveSoon(); });
+    ta.addEventListener('focus', () => (lastTa = ta));
+    ta.addEventListener('keydown', (ev) => {
+      if (ev.isComposing || ev.keyCode === 229) return;
+      if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); addRow(r); }
+      else if (ev.key === 'Tab' && !ev.shiftKey && last && r === R[R.length - 1] && (r.left || r.right)) { ev.preventDefault(); addRow(r); }
+    });
+    return ta;
+  };
+  // 同じ行のセルの高さをそろえる（区切り線が下までつながるように）
+  function eqRow(row) {
+    const tas = [...row.querySelectorAll('textarea')];
+    tas.forEach(fit);
+    const mx = Math.max(...tas.map((t) => parseInt(t.style.height) || LH));
+    tas.forEach((t) => (t.style.height = mx + 'px'));
+  }
+  function draw(focusId) {
+    const head = h('div', { class: 'cmp-row cmp-head' },
+      c.showPoint ? h('div', { class: 'cmp-cell cmp-point cmp-ph' }, '観点') : null,
+      hide ? h('div', { class: 'cmp-cell cmp-left cmp-title' }, c.leftTitle || 'A')
+        : h('input', { class: 'cmp-cell cmp-left cmp-title', value: c.leftTitle, placeholder: '左の見出し（例：絶対参照）', oninput: (e) => { c.leftTitle = e.target.value; saveSoon(); } }),
+      hide ? h('div', { class: 'cmp-cell cmp-right cmp-title' }, c.rightTitle || 'B')
+        : h('input', { class: 'cmp-cell cmp-right cmp-title', value: c.rightTitle, placeholder: '右の見出し（例：相対参照）', oninput: (e) => { c.rightTitle = e.target.value; saveSoon(); } }),
+      hide ? null : h('div', {}));
+    const rows = R.map((r) => {
+      if (hide) {
+        const cell = (key) => h('div', { class: 'cmp-cell cmp-' + key }, h('div', { class: (st.hide === key ? 'mask-block' : ''), html: renderMarked(r[key], true) || '&nbsp;' }));
+        return h('div', { class: 'cmp-row' },
+          c.showPoint ? h('div', { class: 'cmp-cell cmp-point', html: renderMarked(r.point, true) || '&nbsp;' }) : null,
+          cell('left'), cell('right'));
+      }
+      return h('div', { class: 'cmp-row', 'data-id': r.id },
+        c.showPoint ? cellTa(r, 'point', '観点') : null,
+        cellTa(r, 'left', ''), cellTa(r, 'right', '', true),
+        h('button', { class: 'dict-del', 'aria-label': 'この行を削除', title: 'この行を削除', onclick: () => { R.splice(R.indexOf(r), 1); save(); draw(); } }, '✕'));
+    });
+    const sumEl = hide
+      ? h('div', { class: 'cmp-sum' }, h('div', { class: 'cmp-sum-l' }, '共通点・まとめ'), h('div', { class: 'cmp-sum-v', html: renderMarked(c.summary, true) || '&nbsp;' }))
+      : h('div', { class: 'cmp-sum' }, h('div', { class: 'cmp-sum-l' }, '共通点・まとめ'),
+          (() => { const ta = h('textarea', { class: 'cmp-sum-v', rows: 1, value: c.summary, placeholder: '共通点や、どう使い分けるかを書く', oninput: () => { c.summary = ta.value; fit(ta); saveSoon(); } }); ta.addEventListener('focus', () => (lastTa = ta)); return ta; })());
+    box.replaceChildren(head, ...rows, sumEl);
+    box.querySelectorAll('.cmp-row[data-id]').forEach(eqRow);
+    box.querySelectorAll('.cmp-sum-v').forEach((t) => t.tagName === 'TEXTAREA' && fit(t));
+    if (focusId) box.querySelector(`[data-id="${focusId}"] textarea`)?.focus();
+  }
+  const pointBtn = h('button', { onclick: () => { c.showPoint = !c.showPoint; save(); renderMain(); } }, c.showPoint ? '☑ 観点の列' : '☐ 観点の列');
+  const swapBtn = h('button', { onclick: () => { [c.leftTitle, c.rightTitle] = [c.rightTitle, c.leftTitle]; R.forEach((r) => ([r.left, r.right] = [r.right, r.left])); save(); renderMain(); } }, '⇄ 左右を入れ替え');
+  const tools = hide
+    ? [h('div', { class: 'seg' }, [['left', `${c.leftTitle || '左'}を隠す`], ['right', `${c.rightTitle || '右'}を隠す`], ['none', '隠さない']].map(([k, l]) => h('button', { class: st.hide === k ? 'on' : '', onclick: () => { st.hide = k; renderMain(); } }, l))),
+       h('button', { onclick: () => box.querySelectorAll('.mask-block, .mask').forEach((m) => m.classList.add('shown')) }, '👀 すべて表示'),
+       h('button', { onclick: () => box.querySelectorAll('.mask-block, .mask').forEach((m) => m.classList.remove('shown')) }, '🟥 すべて隠す')]
+    : [h('button', { onclick: () => addRow() }, '＋ 行を追加'), pointBtn, swapBtn,
+       h('button', { onmousedown: (e) => e.preventDefault(), onclick: () => lastTa ? wrapSelection(lastTa, '[[', ']]') : toast('先に文字を選択してください') }, '🟥 隠す語')];
+  root.append(h('div', { class: 'toolbar' }, ...tools), box);
+  if (hide) bindMasks(box);
+  else root.append(h('button', { class: 'btn', style: { marginTop: '10px', width: '100%' }, onclick: () => addRow() }, '＋ 行を追加'),
+    h('p', { class: 'hint' }, 'セルの中のEnterは改行 ／ 最後の行の右側でTab、または Ctrl+Enter で次の行'));
   draw();
 }
 const dictUI = {};
@@ -1418,6 +1513,7 @@ type ごとの content:
 - "bullet"（箇条書き）: {"items": [{"text": "項目", "level": 0}, {"text": "子項目", "level": 1, "check": false}]}
 - "cornell"（コーネル式）: {"cues": "キーワード", "notes": "ノート本文", "summary": "まとめ"}
 - "cards"（暗記カード）: {"cards": [{"id": "k1", "front": "表", "back": "裏", "ok": false}]}
+- "compare"（対比ノート）: {"leftTitle": "絶対参照", "rightTitle": "相対参照", "showPoint": true, "rows": [{"id": "r1", "point": "書き方", "left": "$A$1", "right": "A1"}], "summary": "共通点・まとめ"}   ※ point は比べる観点（showPoint が true のとき左端に列で表示）。left/right は改行(\\n)可
 - "dict"（用語辞典）: {"entries": [{"id": "e1", "term": "ROUND", "desc": "ROUND(数値, 桁数)\\n四捨五入\\n桁数0で整数"}], "sort": "added"}   ※ desc は改行(\\n)で複数行。sort は "added"（追加順）か "abc"（あいうえお順）
 `;
 

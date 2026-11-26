@@ -74,6 +74,7 @@ const NOTE_TYPES = {
   cards: { name: '暗記カード', icon: '🃏', desc: '表と裏・赤シート・カード' },
   dict: { name: '用語辞典', icon: '📖', desc: '用語と説明を辞書のように' },
   compare: { name: '対比ノート', icon: '⚖️', desc: '左右に分けて違いを比べる' },
+  blocks: { name: 'まとめノート', icon: '🧩', desc: '文章・表・分岐図を自由に' },
 };
 const TEXT_TYPES = ['lined', 'grid', 'blank'];
 const Q_TYPES = {
@@ -276,6 +277,7 @@ function normalizeNote(n) {
   if (n.type === 'bullet') c.items = Array.isArray(c.items) ? c.items : [];
   if (n.type === 'cornell') { c.cues ??= ''; c.notes ??= ''; c.summary ??= ''; }
   if (n.type === 'cards') c.cards = Array.isArray(c.cards) ? c.cards : [];
+  if (n.type === 'blocks') { c.blocks = Array.isArray(c.blocks) ? c.blocks : []; c.blocks.forEach(normBlock); }
   if (n.type === 'compare') {
     c.leftTitle ??= ''; c.rightTitle ??= ''; c.summary ??= ''; c.showPoint ??= false;
     c.rows = Array.isArray(c.rows) ? c.rows : [];
@@ -290,6 +292,7 @@ function noteText(n) {
     case 'bullet': return (c.items || []).map((i) => '  '.repeat(i.level || 0) + (i.text || '')).join('\n');
     case 'cornell': return [c.cues, c.notes, c.summary].filter(Boolean).join('\n\n');
     case 'cards': return (c.cards || []).map((k) => `${k.front || ''} | ${k.back || ''}`).join('\n');
+    case 'blocks': return blocksText(c.blocks);
     case 'compare': return [`${c.leftTitle || '左'} | ${c.rightTitle || '右'}`, ...(c.rows || []).map((r) => `${r.point ? r.point + '：' : ''}${String(r.left || '').replace(/\n/g, ' / ')} | ${String(r.right || '').replace(/\n/g, ' / ')}`), c.summary || ''].filter(Boolean).join('\n');
     case 'dict': return (c.entries || []).map((e) => `${e.term || ''} | ${String(e.desc || '').replace(/\n/g, ' / ')}`).join('\n');
     default: return c.text || '';
@@ -325,6 +328,7 @@ function convertNote(n, type) {
   else if (type === 'bullet') content = { items: lines.filter((l) => l.trim()).map((l) => ({ text: l.trim(), level: Math.min(5, Math.floor((l.match(/^ */)[0].length) / 2)) })) };
   else if (type === 'cornell') content = { cues: '', notes: text, summary: '' };
   else if (type === 'cards') content = { cards: parseCardLines(text) };
+  else if (type === 'blocks') content = { blocks: text.trim() ? parseRich(text) : [newBlock('text')] };
   else if (type === 'compare') content = { leftTitle: '', rightTitle: '', summary: '', showPoint: false, rows: parseCardLines(text).map((k) => ({ id: uid('r'), point: '', left: k.front, right: k.back.replace(/ \/ /g, '\n') })) };
   else if (type === 'dict') content = { entries: parseCardLines(text).map((k) => ({ id: uid('e'), term: k.front, desc: k.back.replace(/ \/ /g, '\n') })) };
   return { ...n, type, content };
@@ -391,6 +395,7 @@ function newNote(type, folder = '') {
   if (type === 'bullet') n.content.items = [{ text: '', level: 0 }];
   if (type === 'cards') n.content.cards = [{ id: uid('k'), front: '', back: '', ok: false }];
   if (type === 'dict') n.content.entries = [{ id: uid('e'), term: '', desc: '' }];
+  if (type === 'blocks') n.content.blocks = [newBlock('heading'), newBlock('text')];
   if (type === 'compare') n.content.rows = [0, 1, 2].map(() => ({ id: uid('r'), point: '', left: '', right: '' }));
   Store.put(P.note(id), n);
   return id;
@@ -744,7 +749,7 @@ function renderNote(main, id) {
   const save = () => { n.updatedAt = Date.now(); Store.put(path, structuredClone(n)); };
   const saveSoon = debounce(save, 400);
   const isText = TEXT_TYPES.includes(n.type);
-  const modes = n.type === 'cards' ? [['edit', '編集'], ['sheet', '赤シート'], ['flash', 'カード']] : [['edit', '編集'], ['hide', '暗記']];
+  const modes = n.type === 'cards' ? [['edit', '編集'], ['sheet', '赤シート'], ['flash', 'カード']] : n.type === 'blocks' ? [['edit', '編集'], ['view', '表示'], ['hide', '暗記']] : [['edit', '編集'], ['hide', '暗記']];
   const mode = ui.noteMode[id] || 'edit';
 
   main.append(h('div', { class: 'topbar' },
@@ -779,6 +784,7 @@ function renderNote(main, id) {
   else if (n.type === 'cards') cardsEditor(content, n, id, mode, saveSoon, save);
   else if (n.type === 'dict') dictEditor(content, n, id, mode, saveSoon, save);
   else if (n.type === 'compare') compareEditor(content, n, id, mode, saveSoon, save);
+  else if (n.type === 'blocks') blocksEditor(content, n, id, mode, saveSoon, save);
 }
 
 function wrapSelection(ta, before, after, onChange) {
@@ -933,6 +939,281 @@ function cardsEditor(root, n, id, mode, saveSoon, save) {
     h('button', { class: 'btn', style: { marginTop: '10px', width: '100%' }, onclick: () => { cards.push({ id: uid('k'), front: '', back: '', ok: false }); save(); draw(true); } }, '＋ カード追加'));
   draw();
 }
+/* ---------- まとめノート（文章・表・分岐ツリーのブロック） ---------- */
+const BLOCK_TYPES = { heading: '見出し', text: '文章', table: '表', tree: '分岐ツリー', divider: '区切り線' };
+function newBlock(type) {
+  const b = { id: uid('b'), type };
+  if (type === 'heading') { b.text = ''; b.level = 1; }
+  if (type === 'text') b.text = '';
+  if (type === 'table') { b.header = true; b.rows = [['', ''], ['', ''], ['', '']]; }
+  if (type === 'tree') b.nodes = [{ text: '', level: 0 }];
+  return b;
+}
+function normBlock(b) {
+  b.id ??= uid('b');
+  if (!BLOCK_TYPES[b.type]) b.type = 'text';
+  if (b.type === 'heading' || b.type === 'text') b.text ??= '';
+  if (b.type === 'heading') b.level = b.level === 2 ? 2 : 1;
+  if (b.type === 'table') { b.rows = Array.isArray(b.rows) && b.rows.length ? b.rows : [['']]; const w = Math.max(...b.rows.map((r) => r.length)); b.rows = b.rows.map((r) => Array.from({ length: w }, (_, i) => String(r[i] ?? ''))); b.header ??= true; }
+  if (b.type === 'tree') { b.nodes = Array.isArray(b.nodes) && b.nodes.length ? b.nodes : [{ text: '', level: 0 }]; fixLevels(b.nodes); }
+  return b;
+}
+function fixLevels(nodes) {
+  nodes.forEach((nd, i) => { nd.text ??= ''; nd.level = Math.max(0, Math.min(Number(nd.level) || 0, i ? nodes[i - 1].level + 1 : 0)); });
+}
+function blocksText(blocks) {
+  return (blocks || []).map((b) => {
+    if (b.type === 'table') return b.rows.map((r) => r.join('\t')).join('\n');
+    if (b.type === 'tree') return b.nodes.map((nd) => '  '.repeat(nd.level) + nd.text).join('\n');
+    if (b.type === 'divider') return '';
+    return b.text || '';
+  }).filter(Boolean).join('\n\n');
+}
+function treeShape(nodes) {
+  const next = (i, lvl) => { for (let j = i + 1; j < nodes.length; j++) { if (nodes[j].level < lvl) return false; if (nodes[j].level === lvl) return true; } return false; };
+  return nodes.map((nd, i) => { const out = []; for (let d = 1; d <= nd.level; d++) out.push(d < nd.level ? (next(i, d) ? 'v' : 'n') : (next(i, d) ? 't' : 'l')); return out; });
+}
+const isLeaf = (nodes, i) => !(nodes[i + 1] && nodes[i + 1].level > nodes[i].level);
+// 「├ └ │」やインデントの入ったテキスト → ツリー
+function parseTreeText(text) {
+  const out = [], stack = [];
+  for (const raw of String(text).replace(/\t/g, '    ').split('\n')) {
+    if (!raw.trim()) continue;
+    let i = 0, col = 0;
+    while (i < raw.length && /[\s　│├└─┣┗┃━┠┖|｜]/.test(raw[i])) { col += raw[i] === '　' ? 2 : 1; i++; }
+    let t = raw.slice(i).trim();
+    const m = t.match(/^([-*・•]|\d+[.)])\s+/); if (m) t = t.slice(m[0].length);
+    while (stack.length && stack[stack.length - 1] >= col) stack.pop();
+    out.push({ text: t, level: stack.length });
+    stack.push(col);
+  }
+  fixLevels(out);
+  return out;
+}
+function parseTableText(text) {
+  const lines = String(text).split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l.trim());
+  if (!lines.length) return null;
+  if (lines.every((l) => l.trim().startsWith('|'))) {
+    const rows = lines.filter((l) => !/^\s*\|?\s*:?-{2,}/.test(l.replace(/\|/g, '|').trim().replace(/^\|/, '')))
+      .map((l) => { const cells = l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim().replace(/<br\s*\/?>/gi, '\n')); return cells; });
+    return rows.length ? rows : null;
+  }
+  if (lines.some((l) => l.includes('\t'))) return lines.map((l) => l.split('\t'));
+  return null;
+}
+// AIの回答などを貼り付け → 見出し・文章・表・分岐ツリーに分ける
+function parseRich(text) {
+  const lines = String(text).replace(/\r/g, '').split('\n');
+  const blocks = [];
+  let buf = [];
+  const flushText = () => { const t = buf.join('\n').replace(/^\n+|\n+$/g, ''); if (t) blocks.push({ ...newBlock('text'), text: t.replace(/^```\w*\n?|```$/gm, '') }); buf = []; };
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (/^\s*\|.*\|\s*$/.test(l)) {
+      const tl = []; while (i < lines.length && /^\s*\|/.test(lines[i])) tl.push(lines[i++]); i--;
+      const rows = parseTableText(tl.join('\n'));
+      if (rows) { flushText(); blocks.push({ ...newBlock('table'), rows }); continue; }
+    }
+    if (/[├└┣┗]/.test(l)) {
+      // ツリー：直前の非空行（質問）も含め、連続する行をまとめる
+      let start = buf.length; while (start > 0 && buf[start - 1].trim()) start--;
+      const head = buf.splice(start);
+      const tl = [...head]; while (i < lines.length && lines[i].trim() && !/^\s*\|/.test(lines[i])) tl.push(lines[i++]); i--;
+      flushText(); blocks.push({ ...newBlock('tree'), nodes: parseTreeText(tl.join('\n')) }); continue;
+    }
+    const hm = l.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+    if (hm) { flushText(); blocks.push({ ...newBlock('heading'), text: hm[2].replace(/\*\*/g, ''), level: hm[1].length <= 2 ? 1 : 2 }); continue; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(l)) { flushText(); blocks.push(newBlock('divider')); continue; }
+    buf.push(l);
+  }
+  flushText();
+  return blocks.map(normBlock);
+}
+function pasteRichDialog(onAdd, title = '📥 貼り付けて追加') {
+  const ta = h('textarea', { class: 'plain', rows: 12, placeholder: 'AIの回答やメモをそのまま貼り付け\n\n・| で区切った表 や Excel からコピーした表 → 表\n・├ └ を使った分岐 → 分岐ツリー\n・# で始まる行 → 見出し\n・それ以外 → 文章' });
+  modal(title, h('div', {}, ta, h('p', { class: 'hint' }, '表や分岐図は自動で見分けてブロックに変換します。')), [
+    { label: 'キャンセル' },
+    { label: '追加', cls: 'primary', run: () => { const bl = parseRich(ta.value); if (!bl.length) { toast('内容がありません'); return false; } onAdd(bl); toast(`${bl.length}個のブロックを追加しました`); } }]);
+}
+function treeGlyphs(shape) { return shape.map((g) => h('span', { class: 'tg tg-' + g, 'aria-hidden': 'true' })); }
+
+function blocksEditor(root, n, id, mode, saveSoon, save) {
+  const B = n.content.blocks;
+  const view = mode !== 'edit', hide = mode === 'hide';
+  const wrap = h('div', { class: 'paper blocks' + (view ? ' view' : '') });
+  const insertAt = (i, bl) => { B.splice(i, 0, ...[].concat(bl)); save(); draw([].concat(bl)[0].id); };
+  const addMenuItems = (i) => [
+    ...Object.entries(BLOCK_TYPES).map(([k, l]) => ({ label: `＋ ${l}`, run: () => insertAt(i, newBlock(k)) })),
+    { label: '📥 貼り付けて追加', run: () => pasteRichDialog((bl) => insertAt(i, bl)) }];
+
+  function viewBlock(b) {
+    const M = (t) => renderMarked(t, hide);
+    if (b.type === 'heading') return h(b.level === 2 ? 'h3' : 'h2', { class: 'blk-h' + b.level, html: M(b.text) || '&nbsp;' });
+    if (b.type === 'text') return h('div', { class: 'blk-text', html: M(b.text) || '&nbsp;' });
+    if (b.type === 'divider') return h('hr', { class: 'blk-hr' });
+    if (b.type === 'table') return h('div', { class: 'tbl-wrap' }, h('table', { class: 'btable' }, b.rows.map((r, ri) => h('tr', {}, r.map((c) => h(ri === 0 && b.header ? 'th' : 'td', { html: M(c) }))))));
+    if (b.type === 'tree') { const sh = treeShape(b.nodes); return h('div', { class: 'tree' }, b.nodes.map((nd, i) => h('div', { class: 'tr-row' + (nd.level === 0 ? ' root' : '') + (nd.level > 0 && isLeaf(b.nodes, i) ? ' leaf' : '') }, treeGlyphs(sh[i]), h('div', { class: 'tr-text', html: M(nd.text) || '&nbsp;' })))); }
+  }
+
+  function editBlock(b, i) {
+    let body;
+    if (b.type === 'heading') {
+      const ta = h('textarea', { class: 'blk-h' + b.level, rows: 1, value: b.text, placeholder: b.level === 2 ? '小見出し' : '見出し', oninput: () => { b.text = ta.value.replace(/\n/g, ' '); ta.value = b.text; autosize(ta); saveSoon(); } });
+      ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); const nb = B[i + 1]; if (nb && nb.type === 'text') draw(nb.id); else insertAt(i + 1, newBlock('text')); } });
+      body = ta;
+    } else if (b.type === 'text') {
+      const ta = h('textarea', { class: 'blk-text', rows: 2, value: b.text, placeholder: '文章を書く…（AIの回答を貼り付けると表や分岐図も自動で分かれます）', oninput: () => { b.text = ta.value; autosize(ta); saveSoon(); } });
+      ta.addEventListener('paste', (e) => {
+        const t = e.clipboardData?.getData('text/plain') || '';
+        if (!/^\s*\|.*\|\s*$/m.test(t) && !/[├└┣┗]/.test(t)) return;
+        const bl = parseRich(t); if (bl.length <= 1 && bl[0]?.type === 'text') return;
+        e.preventDefault();
+        if (!b.text.trim()) { B.splice(i, 1, ...bl); } else B.splice(i + 1, 0, ...bl);
+        save(); draw(); toast('表・分岐図を自動で変換しました');
+      });
+      body = ta;
+    } else if (b.type === 'divider') body = h('hr', { class: 'blk-hr' });
+    else if (b.type === 'table') body = tableEdit(b);
+    else if (b.type === 'tree') body = treeEdit(b);
+    const items = [
+      i > 0 && { label: '↑ 上へ移動', run: () => { [B[i - 1], B[i]] = [B[i], B[i - 1]]; save(); draw(); } },
+      i < B.length - 1 && { label: '↓ 下へ移動', run: () => { [B[i + 1], B[i]] = [B[i], B[i + 1]]; save(); draw(); } },
+      b.type === 'heading' && { label: b.level === 1 ? '小見出しにする' : '大きい見出しにする', run: () => { b.level = b.level === 1 ? 2 : 1; save(); draw(); } },
+      ...addMenuItems(i + 1).map((it) => ({ ...it, label: '下に' + it.label.replace(/^＋ /, '').replace(/^📥 /, '') + 'を追加' })),
+      { label: '🗑 このブロックを削除', danger: true, run: () => { B.splice(i, 1); if (!B.length) B.push(newBlock('text')); save(); draw(); } }];
+    return h('div', { class: 'blk blk-' + b.type, 'data-id': b.id }, h('div', { class: 'blk-body' }, body), h('div', { class: 'blk-ctl' }, menuButton(items)));
+  }
+
+  function tableEdit(b) {
+    let sel = { r: 0, c: 0 };
+    const tbl = h('table', { class: 'btable edit' });
+    const fillFrom = (rows, r0, c0) => {
+      rows.forEach((row, dr) => row.forEach((val, dc) => {
+        const r = r0 + dr, c = c0 + dc;
+        while (b.rows.length <= r) b.rows.push(Array(b.rows[0].length).fill(''));
+        if (c >= b.rows[0].length) b.rows.forEach((rr) => { while (rr.length <= c) rr.push(''); });
+        b.rows[r][c] = val;
+      }));
+    };
+    const drawT = (focus) => {
+      tbl.replaceChildren(...b.rows.map((row, r) => h('tr', {}, row.map((cell, c) => {
+        const ta = h('textarea', { rows: 1, value: cell, oninput: () => { b.rows[r][c] = ta.value; autosize(ta); saveSoon(); }, onfocus: () => { sel = { r, c }; } });
+        ta.addEventListener('paste', (e) => {
+          const t = e.clipboardData?.getData('text/plain') || '';
+          const rows = (t.includes('\t') || /^\s*\|/.test(t)) ? parseTableText(t) : null;
+          if (!rows) return;
+          e.preventDefault(); fillFrom(rows, r, c); save(); drawT(); toast('表に貼り付けました');
+        });
+        return h(r === 0 && b.header ? 'th' : 'td', {}, ta);
+      }))));
+      tbl.querySelectorAll('textarea').forEach(autosize);
+      if (focus) tbl.rows[focus.r]?.cells[focus.c]?.querySelector('textarea')?.focus();
+    };
+    drawT();
+    const act = (fn) => ({ onmousedown: (e) => e.preventDefault(), onclick: () => { fn(); save(); drawT(sel); } });
+    const w = () => b.rows[0].length;
+    return h('div', {},
+      h('div', { class: 'tbl-wrap' }, tbl),
+      h('div', { class: 'blk-tools' },
+        h('button', act(() => { b.rows.splice(sel.r + 1, 0, Array(w()).fill('')); sel = { r: sel.r + 1, c: sel.c }; }), '＋ 行'),
+        h('button', act(() => { b.rows.forEach((r) => r.splice(sel.c + 1, 0, '')); sel = { r: sel.r, c: sel.c + 1 }; }), '＋ 列'),
+        h('button', act(() => { if (b.rows.length > 1) { b.rows.splice(sel.r, 1); sel.r = Math.min(sel.r, b.rows.length - 1); } }), '− 行'),
+        h('button', act(() => { if (w() > 1) { b.rows.forEach((r) => r.splice(sel.c, 1)); sel.c = Math.min(sel.c, w() - 1); } }), '− 列'),
+        h('button', act(() => { b.header = !b.header; }), b.header ? '☑ 見出し行' : '☐ 見出し行'),
+        h('button', { onclick: () => {
+          const ta = h('textarea', { class: 'plain', rows: 8, placeholder: '| やりたいこと | 使う関数 |\n|---|---|\n| 条件で表示を変える | IF、IFS |\n\nExcel やスプレッドシートからコピーした表もそのまま貼れます' });
+          modal('📥 表を貼り付け', ta, [{ label: 'キャンセル' }, { label: '置き換える', cls: 'primary', run: () => { const rows = parseTableText(ta.value); if (!rows) { toast('表として読めませんでした（| 区切りかタブ区切りにしてください）', 4000); return false; } b.rows = rows; normBlock(b); save(); draw(); } }]);
+        } }, '📥 貼り付け')));
+  }
+
+  function treeEdit(b) {
+    const N = b.nodes;
+    const box = h('div', { class: 'tree edit' });
+    let cur = 0;
+    const drawTree = (focus, caret) => {
+      fixLevels(N);
+      const sh = treeShape(N);
+      box.replaceChildren(...N.map((nd, i) => {
+        const ta = h('textarea', { class: 'tr-text', rows: 1, value: nd.text, placeholder: i === 0 ? '最初の問い（例：古いExcelで開く人がいる？）' : '' });
+        ta.addEventListener('focus', () => { cur = i; });
+        ta.addEventListener('input', () => { nd.text = ta.value.replace(/\n/g, ' '); if (ta.value.includes('\n')) ta.value = nd.text; autosize(ta); saveSoon(); });
+        ta.addEventListener('paste', (e) => {
+          const t = e.clipboardData?.getData('text/plain') || '';
+          if (!t.includes('\n')) return;
+          e.preventDefault();
+          const add = parseTreeText(t).map((x) => ({ ...x, level: x.level + nd.level }));
+          if (!nd.text.trim()) N.splice(i, 1, ...add); else N.splice(i + 1, 0, ...add.map((x) => ({ ...x, level: x.level + 1 })));
+          save(); drawTree(i);
+        });
+        ta.addEventListener('keydown', (e) => {
+          if (e.isComposing || e.keyCode === 229) return;
+          const s = ta.selectionStart, en = ta.selectionEnd;
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const after = ta.value.slice(en); nd.text = ta.value.slice(0, s);
+            const lvl = nd.level === 0 && !after ? 1 : nd.level;
+            // 子がいる場合は子の後ろではなく直後に入れる
+            N.splice(i + 1, 0, { text: after, level: lvl }); save(); drawTree(i + 1, 0);
+          } else if (e.key === 'Tab') {
+            e.preventDefault(); nd.level = Math.max(0, nd.level + (e.shiftKey ? -1 : 1)); save(); drawTree(i, s);
+          } else if (e.key === 'Backspace' && s === 0 && en === 0 && i > 0) {
+            e.preventDefault();
+            if (nd.text && nd.level > 0) { nd.level--; save(); drawTree(i, 0); return; }
+            const prev = N[i - 1], pl = prev.text.length; prev.text += nd.text; N.splice(i, 1); save(); drawTree(i - 1, pl);
+          } else if (e.key === 'ArrowUp' && s === 0 && i > 0) { e.preventDefault(); drawTree(i - 1, N[i - 1].text.length); }
+          else if (e.key === 'ArrowDown' && en === ta.value.length && i < N.length - 1) { e.preventDefault(); drawTree(i + 1, 0); }
+        });
+        return h('div', { class: 'tr-row' + (nd.level === 0 ? ' root' : '') }, treeGlyphs(sh[i]), ta);
+      }));
+      box.querySelectorAll('textarea').forEach(autosize);
+      if (focus != null) { const ta = box.querySelectorAll('textarea')[focus]; if (ta) { ta.focus(); const c = caret ?? ta.value.length; ta.setSelectionRange(c, c); cur = focus; } }
+    };
+    drawTree();
+    const act = (fn) => ({ onmousedown: (e) => e.preventDefault(), onclick: () => { fn(); save(); drawTree(cur); } });
+    return h('div', {}, box,
+      h('div', { class: 'blk-tools' },
+        h('button', act(() => { N.splice(cur + 1, 0, { text: '', level: Math.max(1, N[cur].level) }); cur++; }), '＋ 分岐'),
+        h('button', act(() => { N.splice(cur + 1, 0, { text: '', level: N[cur].level + 1 }); cur++; }), '＋ その下に'),
+        h('button', act(() => { N[cur].level++; }), '→ 下の階層へ'),
+        h('button', act(() => { N[cur].level = Math.max(0, N[cur].level - 1); }), '← 上の階層へ'),
+        h('button', act(() => { if (N.length > 1) { N.splice(cur, 1); cur = Math.max(0, cur - 1); } else N[0].text = ''; }), '✕ 削除'),
+        h('button', { onclick: () => {
+          const ta = h('textarea', { class: 'plain', rows: 9, placeholder: 'そのファイルを古いExcelで開く人がいる？\n ├ いない → XLOOKUP\n └ いる\n      ├ はい → VLOOKUP\n      └ いいえ → INDEX＋MATCH\n\n├ └ │ やスペースの字下げで階層を読み取ります' });
+          modal('📥 分岐ツリーを貼り付け', ta, [{ label: 'キャンセル' }, { label: '置き換える', cls: 'primary', run: () => { const nodes = parseTreeText(ta.value); if (!nodes.length) { toast('内容がありません'); return false; } b.nodes = nodes; save(); draw(); } }]);
+        } }, '📥 貼り付け')),
+      h('p', { class: 'hint' }, 'Enterで次の項目 ／ Tabで下の階層・Shift+Tabで上の階層 ／ 「→ 答え」のように書くと分岐の結論になります'));
+  }
+
+  function draw(focusId) {
+    if (view) {
+      wrap.replaceChildren(...(B.length ? B.map(viewBlock) : [h('div', { class: 'empty' }, '（空のノート）')]));
+      return;
+    }
+    wrap.replaceChildren(...B.map(editBlock),
+      h('div', { class: 'blk-add' }, h('span', { class: 'muted small' }, '追加：'),
+        Object.entries(BLOCK_TYPES).map(([k, l]) => h('button', { onclick: () => insertAt(B.length, newBlock(k)) }, '＋ ' + l)),
+        h('button', { onclick: () => pasteRichDialog((bl) => insertAt(B.length, bl)) }, '📥 貼り付け')));
+    requestAnimationFrame(() => wrap.querySelectorAll('textarea').forEach(autosize));
+    if (focusId) setTimeout(() => wrap.querySelector(`[data-id="${focusId}"] textarea`)?.focus(), 0);
+  }
+  if (view) {
+    bindMasks(wrap);
+    root.append(h('div', { class: 'toolbar' },
+      hide ? [h('button', { onclick: () => wrap.querySelectorAll('.mask').forEach((m) => m.classList.add('shown')) }, '👀 すべて表示'),
+        h('button', { onclick: () => wrap.querySelectorAll('.mask').forEach((m) => m.classList.remove('shown')) }, '🟥 すべて隠す'),
+        h('span', { class: 'hint', style: { alignSelf: 'center' } }, '[[ ]] で囲んだ語が隠れます')]
+        : h('span', { class: 'hint', style: { alignSelf: 'center' } }, '読みやすい表示です。書き直すときは「編集」へ')), wrap);
+  } else {
+    let lastTa = null;
+    wrap.addEventListener('focusin', (e) => { if (e.target.tagName === 'TEXTAREA') lastTa = e.target; });
+    root.append(h('div', { class: 'toolbar' },
+      h('button', { onclick: () => pasteRichDialog((bl) => insertAt(B.length, bl)) }, '📥 AIの回答などを貼り付け'),
+      h('button', { onmousedown: (e) => e.preventDefault(), onclick: () => lastTa ? wrapSelection(lastTa, '[[', ']]') : toast('先に文字を選択してください') }, '🟥 隠す語'),
+      h('button', { onmousedown: (e) => e.preventDefault(), onclick: () => lastTa ? wrapSelection(lastTa, '**', '**') : toast('先に文字を選択してください') }, '𝐁 太字')), wrap);
+  }
+  draw();
+}
+
 const cmpUI = {};
 function compareEditor(root, n, id, mode, saveSoon, save) {
   const c = n.content, R = c.rows;
@@ -1513,6 +1794,12 @@ type ごとの content:
 - "bullet"（箇条書き）: {"items": [{"text": "項目", "level": 0}, {"text": "子項目", "level": 1, "check": false}]}
 - "cornell"（コーネル式）: {"cues": "キーワード", "notes": "ノート本文", "summary": "まとめ"}
 - "cards"（暗記カード）: {"cards": [{"id": "k1", "front": "表", "back": "裏", "ok": false}]}
+- "blocks"（まとめノート）: {"blocks": [ブロック, ...]}  ブロックは次のいずれか:
+  - {"type": "heading", "text": "見出し", "level": 1}   ※ level 2 で小見出し
+  - {"type": "text", "text": "文章（改行可）"}
+  - {"type": "table", "header": true, "rows": [["やりたいこと", "使う関数"], ["条件で表示を変える", "IF、IFS"]]}   ※ 1行目が見出し行
+  - {"type": "tree", "nodes": [{"text": "古いExcelで開く人がいる？", "level": 0}, {"text": "いない → XLOOKUP", "level": 1}, {"text": "いる", "level": 1}, {"text": "はい → VLOOKUP", "level": 2}]}   ※ 分岐図。level は階層（0が最初の問い）
+  - {"type": "divider"}
 - "compare"（対比ノート）: {"leftTitle": "絶対参照", "rightTitle": "相対参照", "showPoint": true, "rows": [{"id": "r1", "point": "書き方", "left": "$A$1", "right": "A1"}], "summary": "共通点・まとめ"}   ※ point は比べる観点（showPoint が true のとき左端に列で表示）。left/right は改行(\\n)可
 - "dict"（用語辞典）: {"entries": [{"id": "e1", "term": "ROUND", "desc": "ROUND(数値, 桁数)\\n四捨五入\\n桁数0で整数"}], "sort": "added"}   ※ desc は改行(\\n)で複数行。sort は "added"（追加順）か "abc"（あいうえお順）
 `;

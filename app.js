@@ -196,6 +196,11 @@ async function runSync({ manual = false } = {}) {
       } else if (local.deleted) {
         F[path] = { data, sha, dirty: false, deleted: false, v: (local.v || 0) + 1 }; // 他端末で更新されたので削除を取り消す
         changedOpen.push(path);
+      } else if (path === META) {
+        const merged = {};
+        for (const k of new Set([...Object.keys(data || {}), ...Object.keys(local.data || {})])) merged[k] = [...new Set([...(data?.[k] || []), ...(local.data?.[k] || [])])];
+        F[path] = { data: merged, sha, dirty: true, deleted: false, v: (local.v || 0) + 1 };
+        changedOpen.push(path);
       } else if (path.startsWith('data/progress/')) {
         F[path] = { data: mergeProgress(local.data, data), sha, dirty: true, deleted: false, v: (local.v || 0) + 1 };
         changedOpen.push(path);
@@ -296,9 +301,59 @@ function parseCardLines(text) {
     return { id: uid('k'), front: (m[0] || '').trim(), back: m.slice(1).join(' ').trim(), ok: false };
   });
 }
+/* ---- folders (大見出し) ---- */
+const META = 'data/meta/folders.json';
+const jaSort = (a, b) => a.localeCompare(b, 'ja');
+const kindOf = (isQuiz) => (isQuiz ? 'quizzes' : 'notes');
+const pathFor = (kind, id) => (kind === 'quizzes' ? P.quiz(id) : P.note(id));
+function folderList(kind) {
+  const order = (Store.get(META) || {})[kind] || [];
+  const used = [...new Set(Store.list(`data/${kind}/`).map((i) => i.data.folder).filter(Boolean))];
+  return [...order, ...used.filter((f) => !order.includes(f)).sort(jaSort)];
+}
+function setFolderOrder(kind, arr) { const m = structuredClone(Store.get(META) || {}); m[kind] = [...new Set(arr)]; Store.put(META, m); }
+function addFolder(kind, name) { name = name.trim(); if (!name) return; const l = folderList(kind); if (!l.includes(name)) setFolderOrder(kind, [...l, name]); }
+function renameFolder(kind, from, to) {
+  to = to.trim(); if (!to || to === from) return;
+  for (const i of Store.list(`data/${kind}/`)) if (i.data.folder === from) Store.put(i.path, { ...structuredClone(i.data), folder: to });
+  const l = folderList(kind).map((f) => (f === from ? to : f));
+  setFolderOrder(kind, l);
+  const ck = prefs.collapsed || {}; if (ck[kind + ':' + from]) { ck[kind + ':' + to] = true; delete ck[kind + ':' + from]; savePrefs(); }
+}
+function deleteFolder(kind, name) {
+  for (const i of Store.list(`data/${kind}/`)) if (i.data.folder === name) Store.put(i.path, { ...structuredClone(i.data), folder: '' });
+  setFolderOrder(kind, folderList(kind).filter((f) => f !== name));
+}
+function moveFolder(kind, name, dir) {
+  const l = folderList(kind), i = l.indexOf(name), j = i + dir;
+  if (i < 0 || j < 0 || j >= l.length) return;
+  [l[i], l[j]] = [l[j], l[i]]; setFolderOrder(kind, l);
+}
+const itemOrder = (d) => d.order ?? d.createdAt ?? 0;
+function folderItems(kind, folder) {
+  return Store.list(`data/${kind}/`).filter((i) => (i.data.folder || '') === (folder || '')).sort((a, b) => itemOrder(a.data) - itemOrder(b.data) || jaSort(a.data.title || '', b.data.title || ''));
+}
+function moveItem(kind, id, dir) {
+  const d = Store.get(pathFor(kind, id)); if (!d) return;
+  const list = folderItems(kind, d.folder);
+  const i = list.findIndex((x) => x.id === id), j = i + dir;
+  if (i < 0 || j < 0 || j >= list.length) { toast(dir < 0 ? 'いちばん上です' : 'いちばん下です'); return; }
+  [list[i], list[j]] = [list[j], list[i]];
+  list.forEach((x, k) => { if (x.data.order !== k) Store.put(x.path, { ...structuredClone(x.data), order: k }); });
+}
+function nextOrder(kind, folder) { const l = folderItems(kind, folder); return l.length ? Math.max(...l.map((x) => itemOrder(x.data))) + 1 : 0; }
+function folderNameDialog(title, initial, onOk) {
+  const inp = h('input', { type: 'text', value: initial || '', placeholder: '例：Excel、簿記3級、英語' });
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); ov.querySelector('.btn.primary').click(); } });
+  modal(title, h('div', {}, h('label', {}, 'フォルダ名（大見出し）'), inp), [
+    { label: 'キャンセル' },
+    { label: 'OK', cls: 'primary', run: () => { if (!inp.value.trim()) { toast('名前を入れてください'); return false; } onOk(inp.value.trim()); } }]);
+  const ov = document.querySelector('.overlay:last-of-type');
+}
+
 function newNote(type, folder = '') {
   const id = uid('n');
-  const n = normalizeNote({ title: '', type, folder, createdAt: Date.now(), updatedAt: Date.now(), content: {} });
+  const n = normalizeNote({ title: '', type, folder, order: nextOrder('notes', folder), createdAt: Date.now(), updatedAt: Date.now(), content: {} });
   if (type === 'bullet') n.content.items = [{ text: '', level: 0 }];
   if (type === 'cards') n.content.cards = [{ id: uid('k'), front: '', back: '', ok: false }];
   Store.put(P.note(id), n);
@@ -514,9 +569,8 @@ function renderSide() {
         h('button', { class: 'icon-btn', title: '設定', 'aria-label': '設定', onclick: () => go('#/settings') }, '⚙️')),
       h('div', { class: 'tabs', id: 'tabs' }),
       h('div', { class: 'search' }, h('input', { type: 'search', placeholder: '検索', value: ui.search, oninput: (e) => { ui.search = e.target.value; renderList(); } })),
-      h('div', { class: 'chips', id: 'chips' }),
       h('div', { class: 'list', id: 'list' }),
-      h('button', { class: 'fab', onclick: () => (prefs.tab === 'quizzes' ? newQuizDialog() : newNoteDialog()) }, '＋ 新規'));
+      h('button', { class: 'fab', onclick: () => (prefs.tab === 'quizzes' ? newQuizDialog(ui.folder || '') : newNoteDialog(ui.folder || '')) }, '＋ 新規'));
   }
   paintSyncPill($('#syncpill'));
   renderList();
@@ -526,19 +580,10 @@ function renderList() {
   tabs.replaceChildren(
     h('button', { class: prefs.tab === 'notes' ? 'on' : '', onclick: () => { prefs.tab = 'notes'; ui.folder = null; savePrefs(); renderList(); } }, '📒 ノート'),
     h('button', { class: prefs.tab === 'quizzes' ? 'on' : '', onclick: () => { prefs.tab = 'quizzes'; ui.folder = null; savePrefs(); renderList(); } }, '✏️ 問題集'));
-  const isQuiz = prefs.tab === 'quizzes';
-  let items = Store.list(isQuiz ? 'data/quizzes/' : 'data/notes/');
-  const folders = [...new Set(items.map((i) => i.data.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ja'));
-  $('#chips').replaceChildren(...(folders.length ? [h('button', { class: 'chip' + (ui.folder == null ? ' on' : ''), onclick: () => { ui.folder = null; renderList(); } }, 'すべて'),
-    ...folders.map((f) => h('button', { class: 'chip' + (ui.folder === f ? ' on' : ''), onclick: () => { ui.folder = f; renderList(); } }, f))] : []));
-  if (ui.folder != null) items = items.filter((i) => i.data.folder === ui.folder);
-  const q = norm(ui.search);
-  if (q) items = items.filter((i) => norm(i.data.title + ' ' + (isQuiz ? (i.data.questions || []).map((x) => x.question).join(' ') : noteText(i.data))).includes(q));
-  items.sort((a, b) => (b.data.updatedAt || 0) - (a.data.updatedAt || 0));
+  const isQuiz = prefs.tab === 'quizzes', kind = kindOf(isQuiz);
   const { parts } = route();
   const list = $('#list');
-  if (!items.length) { list.replaceChildren(h('div', { class: 'empty' }, q ? '見つかりませんでした' : isQuiz ? 'まだ問題集がありません。\n「＋ 新規」から作成・AIで生成できます。' : 'まだノートがありません。')); return; }
-  list.replaceChildren(...items.map((i) => {
+  const row = (i, inFolder) => {
     const d = i.data;
     let ico, sub;
     if (isQuiz) {
@@ -548,27 +593,83 @@ function renderList() {
       ico = NOTE_TYPES[d.type]?.icon || '📓';
       sub = noteText(d).replace(/\[\[|\]\]|\*\*/g, '').replace(/\s+/g, ' ').slice(0, 60) || NOTE_TYPES[d.type]?.name;
     }
-    const href = `#/${isQuiz ? 'quiz' : 'note'}/${i.id}`;
-    const on = parts[1] === i.id;
-    return h('a', { class: 'item' + (on ? ' on' : ''), href },
+    return h('a', { class: 'item' + (inFolder ? ' sub' : '') + (parts[1] === i.id ? ' on' : ''), href: `#/${isQuiz ? 'quiz' : 'note'}/${i.id}` },
       h('div', { class: 'ico' }, ico),
       h('div', { class: 'body' },
         h('div', { class: 't' }, d.title || '無題'),
-        h('div', { class: 's' }, [d.folder ? `📁${d.folder} ・ ` : '', fmtDate(d.updatedAt), ' ', sub].join(''))));
-  }));
+        h('div', { class: 's' }, [!inFolder && d.folder ? `📁${d.folder} ・ ` : '', fmtDate(d.updatedAt), ' ', sub].join(''))));
+  };
+
+  // 検索中はフラットに表示
+  const q = norm(ui.search);
+  if (q) {
+    const items = Store.list(`data/${kind}/`)
+      .filter((i) => norm(i.data.title + ' ' + (i.data.folder || '') + ' ' + (isQuiz ? (i.data.questions || []).map((x) => x.question).join(' ') : noteText(i.data))).includes(q))
+      .sort((a, b) => (b.data.updatedAt || 0) - (a.data.updatedAt || 0));
+    list.replaceChildren(...(items.length ? items.map((i) => row(i, false)) : [h('div', { class: 'empty' }, '見つかりませんでした')]));
+    return;
+  }
+
+  prefs.collapsed ||= {};
+  const folders = folderList(kind);
+  const out = [];
+  folders.forEach((f, fi) => {
+    const key = kind + ':' + f, closed = !!prefs.collapsed[key];
+    const items = folderItems(kind, f);
+    const hasOpen = items.some((i) => i.id === parts[1]);
+    out.push(h('div', { class: 'folder' + (hasOpen ? ' has-on' : '') },
+      h('button', { class: 'folder-toggle', 'aria-expanded': String(!closed), onclick: () => { prefs.collapsed[key] = !closed; savePrefs(); renderList(); } },
+        h('span', { class: 'caret' }, closed ? '▸' : '▾'), h('span', { class: 'fname' }, f), h('span', { class: 'fcount' }, items.length)),
+      h('button', { class: 'icon-btn sm', title: `「${f}」に追加`, 'aria-label': `${f}に追加`, onclick: () => { ui.folder = f; isQuiz ? newQuizDialog(f) : newNoteDialog(f); } }, '＋'),
+      menuButton([
+        { label: '✏️ 名前を変更', run: () => folderNameDialog('フォルダ名を変更', f, (v) => { renameFolder(kind, f, v); renderList(); }) },
+        fi > 0 && { label: '↑ 上へ移動', run: () => { moveFolder(kind, f, -1); renderList(); } },
+        fi < folders.length - 1 && { label: '↓ 下へ移動', run: () => { moveFolder(kind, f, 1); renderList(); } },
+        { label: '🗑 フォルダを削除', danger: true, run: async () => {
+          if (await confirmDlg(`フォルダ「${f}」を削除しますか？\n中の${isQuiz ? '問題集' : 'ノート'}（${items.length}件）は消えず、「フォルダなし」に移ります。`, '削除', true)) { deleteFolder(kind, f); renderList(); }
+        } },
+      ])));
+    if (!closed) {
+      if (items.length) out.push(...items.map((i) => row(i, true)));
+      else out.push(h('div', { class: 'folder-empty' }, 'まだありません。＋ で追加'));
+    }
+  });
+  const loose = folderItems(kind, '').sort((a, b) => (b.data.updatedAt || 0) - (a.data.updatedAt || 0));
+  if (loose.length) {
+    if (folders.length) out.push(h('div', { class: 'folder loose' }, h('span', { class: 'fname' }, 'フォルダなし')));
+    out.push(...loose.map((i) => row(i, false)));
+  }
+  if (!folders.length && !loose.length) out.push(h('div', { class: 'empty' }, isQuiz ? 'まだ問題集がありません。\n「＋ 新規」から作成・AIで生成できます。' : 'まだノートがありません。'));
+  out.push(h('button', { class: 'add-folder', onclick: () => folderNameDialog('新しいフォルダ（大見出し）', '', (v) => { addFolder(kind, v); prefs.collapsed[kind + ':' + v] = false; savePrefs(); ui.folder = v; renderList(); }) }, '📁 ＋ 新しいフォルダ（大見出し）'));
+  list.replaceChildren(...out);
 }
 
 /* ================= new dialogs ================= */
-function newNoteDialog() {
-  const grid = h('div', { class: 'type-grid' }, Object.entries(NOTE_TYPES).map(([k, t]) =>
-    h('button', { class: 'type-opt', onclick: () => { close(); const id = newNote(k, ui.folder || ''); ui.noteMode[id] = 'edit'; go(`#/note/${id}`); setTimeout(() => $('.title-input')?.focus(), 50); } },
-      h('div', { class: 'pv ' + k }), h('b', {}, t.icon + ' ' + t.name), h('span', {}, t.desc))));
-  const close = modal('新しいノート', grid);
+function folderSelect(kind, value) {
+  const sel = h('select', { style: { width: '100%' } },
+    h('option', { value: '' }, '（フォルダなし）'),
+    folderList(kind).map((f) => h('option', { value: f, selected: f === value }, '📁 ' + f)),
+    h('option', { value: '__new' }, '＋ 新しいフォルダを作る…'));
+  sel.addEventListener('change', () => {
+    if (sel.value !== '__new') return;
+    sel.value = value || '';
+    folderNameDialog('新しいフォルダ（大見出し）', '', (v) => { addFolder(kind, v); sel.insertBefore(h('option', { value: v }, '📁 ' + v), sel.lastChild); sel.value = v; });
+  });
+  return sel;
 }
-function newQuizDialog() {
+function newNoteDialog(folder = '') {
+  const sel = folderSelect('notes', folder);
+  const grid = h('div', { class: 'type-grid' }, Object.entries(NOTE_TYPES).map(([k, t]) =>
+    h('button', { class: 'type-opt', onclick: () => { close(); const f = sel.value === '__new' ? '' : sel.value; ui.folder = f || null; const id = newNote(k, f); ui.noteMode[id] = 'edit'; go(`#/note/${id}`); setTimeout(() => $('.title-input')?.focus(), 50); } },
+      h('div', { class: 'pv ' + k }), h('b', {}, t.icon + ' ' + t.name), h('span', {}, t.desc))));
+  const close = modal('新しいノート', h('div', {}, h('label', { style: { marginTop: 0 } }, '入れるフォルダ（大見出し）'), sel, h('label', {}, 'ノートの形式'), grid));
+}
+function newQuizDialog(folder = '') {
+  const sel = folderSelect('quizzes', folder);
   const req = h('textarea', { class: 'plain', rows: 3, placeholder: '例：簿記3級の仕訳問題を15問、本試験レベルで。解説も詳しく。' });
   const paste = h('textarea', { class: 'plain', rows: 6, placeholder: 'AIが出力したJSONをここに貼り付け' });
   const body = h('div', {},
+    h('label', { style: { marginTop: 0 } }, '入れるフォルダ（大見出し）'), sel,
     h('p', { class: 'small muted' }, 'AI（Claude や ChatGPT など）に問題集を作ってもらって取り込めます。'),
     h('label', {}, '① 作りたい問題集の内容'), req,
     h('div', { class: 'row', style: { marginTop: '8px' } },
@@ -576,14 +677,14 @@ function newQuizDialog() {
     h('label', {}, '② AIの回答（JSON）を貼り付け'), paste,
     h('p', { class: 'hint' }, 'Claude Code でデータ用リポジトリを開いて「問題集を作って」と頼むと、直接追加されて同期されます（設定画面の説明参照）。'));
   modal('新しい問題集', body, [
-    { label: '空の問題集を作る', run: () => { const id = uid('z'); Store.put(P.quiz(id), { title: '新しい問題集', description: '', folder: ui.folder || '', createdAt: Date.now(), updatedAt: Date.now(), questions: [] }); prefs.tab = 'quizzes'; go(`#/quiz/${id}`); } },
+    { label: '空の問題集を作る', run: () => { const id = uid('z'); const f = sel.value === '__new' ? '' : sel.value; Store.put(P.quiz(id), { title: '新しい問題集', description: '', folder: f, order: nextOrder('quizzes', f), createdAt: Date.now(), updatedAt: Date.now(), questions: [] }); prefs.tab = 'quizzes'; go(`#/quiz/${id}`); } },
     { label: '取り込む', cls: 'primary', run: () => {
       try {
         const obj = questionsFrom(extractJson(paste.value));
         const errs = validateQuestions(obj.questions);
         if (errs.length) { toast(errs.slice(0, 3).join(' / '), 5000); return false; }
         const id = uid('z');
-        const z = mergeQuestions({ title: obj.title || '新しい問題集', description: obj.description || '', folder: obj.folder || ui.folder || '', accounts: obj.accounts, createdAt: Date.now(), updatedAt: Date.now(), questions: [] }, obj.questions);
+        const z = mergeQuestions({ title: obj.title || '新しい問題集', description: obj.description || '', folder: (sel.value !== '__new' && sel.value) || obj.folder || '', order: Date.now(), accounts: obj.accounts, createdAt: Date.now(), updatedAt: Date.now(), questions: [] }, obj.questions);
         Store.put(P.quiz(id), z); prefs.tab = 'quizzes'; savePrefs(); toast(`${z.questions.length}問を取り込みました`); go(`#/quiz/${id}`);
       } catch (e) { toast('読み込めません: ' + e.message, 4000); return false; }
     } },
@@ -593,8 +694,8 @@ function newQuizDialog() {
 /* ================= note editor ================= */
 function folderInput(value, onChange, prefix) {
   const listId = 'folders-' + prefix;
-  const folders = [...new Set(Store.list(`data/${prefix}/`).map((i) => i.data.folder).filter(Boolean))];
-  return [h('input', { type: 'text', value, placeholder: '📁 フォルダ', list: listId, style: { width: '140px' }, onchange: (e) => onChange(e.target.value.trim()) }),
+  const folders = folderList(prefix);
+  return [h('input', { type: 'text', value, placeholder: '📁 フォルダ', list: listId, style: { width: '140px' }, onchange: (e) => { const v = e.target.value.trim(); if (v) addFolder(prefix, v); onChange(v); } }),
     h('datalist', { id: listId }, folders.map((f) => h('option', { value: f })))];
 }
 function backBtn() { return h('button', { class: 'icon-btn mobile-only', 'aria-label': '戻る', onclick: () => go('#/') }, '‹'); }
@@ -612,8 +713,11 @@ function renderNote(main, id) {
 
   main.append(h('div', { class: 'topbar' },
     backBtn(),
+    n.folder ? h('span', { class: 'crumb' }, n.folder, ' ›') : null,
     h('input', { class: 'title-input', value: n.title, placeholder: '無題のノート', oninput: (e) => { n.title = e.target.value; saveSoon(); } }),
     menuButton([
+      { label: '↑ フォルダ内で上へ', run: () => moveItem('notes', id, -1) },
+      { label: '↓ フォルダ内で下へ', run: () => moveItem('notes', id, 1) },
       { label: '📄 複製', run: () => { const nid = uid('n'); Store.put(P.note(nid), { ...structuredClone(n), title: n.title + '（コピー）', createdAt: Date.now(), updatedAt: Date.now() }); go(`#/note/${nid}`); } },
       { label: '⬇️ JSONで書き出し', run: () => download(`${n.title || 'note'}.json`, JSON.stringify(n, null, 2)) },
       { label: '📋 テキストをコピー', run: async () => { await copyText(noteText(n)); toast('コピーしました'); } },
@@ -627,7 +731,7 @@ function renderNote(main, id) {
         Object.assign(n, normalizeNote(convertNote(n, t))); save(); renderMain();
       } else e.target.value = n.type;
     } }, Object.entries(NOTE_TYPES).map(([k, t]) => h('option', { value: k, selected: k === n.type }, t.icon + ' ' + t.name))),
-    folderInput(n.folder, (v) => { n.folder = v; save(); }, 'notes'),
+    folderInput(n.folder, (v) => { if (v !== n.folder) { n.order = nextOrder('notes', v); n.folder = v; save(); renderMain(); } }, 'notes'),
     h('div', { class: 'grow' }),
     h('div', { class: 'seg' }, modes.map(([k, l]) => h('button', { class: mode === k ? 'on' : '', onclick: () => { ui.noteMode[id] = k; renderMain(); } }, l)))));
 
@@ -855,13 +959,15 @@ function renderQuiz(main, id) {
     h('input', { class: 'title-input', value: z.title, placeholder: '無題の問題集', onchange: (e) => { const r = raw(); r.title = e.target.value; saveQuiz(r); } }),
     menuButton([
       { label: '🤖 AIで問題を追加', run: () => aiAddDialog(id) },
+      { label: '↑ フォルダ内で上へ', run: () => moveItem('quizzes', id, -1) },
+      { label: '↓ フォルダ内で下へ', run: () => moveItem('quizzes', id, 1) },
       { label: '{ } JSONを直接編集', run: () => jsonEditDialog(id) },
       { label: '⬇️ JSONで書き出し', run: () => download(`${z.title || 'quiz'}.json`, JSON.stringify(Store.get(P.quiz(id)), null, 2)) },
       { label: '↺ 解答記録をリセット', run: async () => { if (await confirmDlg('この問題集の解答記録をすべて消しますか？', 'リセット', true)) { Store.put(P.prog(id), { q: {} }); renderMain(); } } },
       { label: '🗑 問題集を削除', danger: true, run: async () => { if (await confirmDlg(`「${z.title}」を削除しますか？`, '削除', true)) { Store.remove(P.quiz(id)); if (Store.get(P.prog(id))) Store.remove(P.prog(id)); go('#/'); } } },
     ])));
   main.append(h('div', { class: 'meta' },
-    folderInput(z.folder, (v) => { const r = raw(); r.folder = v; saveQuiz(r); }, 'quizzes'),
+    folderInput(z.folder, (v) => { const r = raw(); if (v !== r.folder) { r.order = nextOrder('quizzes', v); r.folder = v; saveQuiz(r); } }, 'quizzes'),
     h('input', { type: 'text', value: z.description, placeholder: '説明', class: 'grow', onchange: (e) => { const r = raw(); r.description = e.target.value; saveQuiz(r); } })));
 
   const c = h('div', { class: 'content' });
@@ -1192,6 +1298,10 @@ AI（Claude Code など）は、このファイルの形式に従って JSON フ
 - \`data/quizzes/<id>.json\` … 問題集（1ファイル1冊）。ファイル名の \`<id>\` は英数字とハイフン（例: \`boki3-shiwake.json\`）
 - \`data/notes/<id>.json\` … ノート
 - \`data/progress/<id>.json\` … 問題集ごとの解答記録（アプリが管理）
+- \`data/meta/folders.json\` … フォルダ（大見出し）の並び順 \`{"notes":["Excel","簿記3級"],"quizzes":["簿記3級"]}\`
+
+ノート・問題集の \`"folder"\` がフォルダ名（大見出し）、\`"order"\`（数値・小さい順）がフォルダ内の並び順です。
+新しいフォルダを作るときは \`data/meta/folders.json\` にも名前を追加してください。
 
 ## 問題集の形式 (data/quizzes/*.json)
 \`\`\`json
